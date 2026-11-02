@@ -1,5 +1,5 @@
 import { bonesIn } from "@skullet/test-cases";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   addStyles,
   createSkeletonBox,
@@ -14,6 +14,7 @@ beforeAll(addStyles);
 afterAll(removeStyles);
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   document.body.replaceChildren();
 });
 
@@ -86,6 +87,41 @@ describe("animation", () => {
     const { offset, tile } = sweep(root);
     return ((-offset % tile) + tile) % tile;
   };
+
+  it("pulses instead of sweeping when the engine cannot mask", () => {
+    const supports = vi.spyOn(CSS, "supports").mockReturnValue(false);
+    const { root, bones } = skeleton("");
+    supports.mockRestore();
+
+    expect(sheenIn(root)).toBeNull();
+    const frames = (
+      animation(bones[0]!)!.effect as KeyframeEffect
+    ).getKeyframes();
+    expect(frames.map((frame) => Number(frame.opacity))).toEqual([1, 0.45, 1]);
+  });
+
+  it("keeps the bones visible and drops the sweep in forced colors", () => {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query.includes("forced-colors"),
+      media: query,
+      onchange: null,
+      addListener() {},
+      removeListener() {},
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent: () => false,
+    }));
+    const { root, bones } = skeleton("");
+
+    const sheen = sheenIn(root)!;
+    expect(sheen.getAttribute("style")).toContain("display: none");
+    const boneStyle = bones[0]!.getAttribute("style") ?? "";
+    expect(boneStyle.toLowerCase()).toContain("background-color: canvastext");
+    // Safari has no forced colors; where the property exists, it must opt out of the palette
+    if (CSS.supports("forced-color-adjust", "none")) {
+      expect(boneStyle.toLowerCase()).toContain("forced-color-adjust: none");
+    }
+  });
 
   it("runs one stream across the page — a layer further right is further along it", () => {
     const left = skeleton("").root;

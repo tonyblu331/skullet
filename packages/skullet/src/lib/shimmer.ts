@@ -15,6 +15,20 @@ const MAX_BAND = 320; // The highlight's width, so it doesn't grow heavier on a 
 const SPACING = 2.5; // bands follow each other this many band-widths apart, start to start — the gap between sweeps
 const PULSE_LOW = 0.45; // opacity at the bottom of a pulse
 
+// Forced colors removes background images and overrides background colors; the shadow root means
+// the page stylesheet cannot reach the bones, so the palette has to be inline.
+const forcedColors = () =>
+  typeof matchMedia === "function" &&
+  matchMedia("(forced-colors: active)").matches;
+
+const canMask = () =>
+  typeof CSS === "undefined" || typeof CSS.supports !== "function"
+    ? true
+    : CSS.supports(
+        "mask-image",
+        'url("data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22/>")',
+      );
+
 const ANIMATIONS: readonly SkulletAnimation[] = [
   "shimmer",
   "group-shimmer",
@@ -222,12 +236,13 @@ type Sheen = {
   pageWidth: number;
   width: number;
   height: number;
+  forced: boolean;
 };
 
 function drawSheen(
   root: ShadowRoot,
   rects: SkeletonRect[],
-  { group, motion, pageWidth, width, height }: Sheen,
+  { group, motion, pageWidth, width, height, forced }: Sheen,
 ) {
   let sheen = root.querySelector<HTMLElement>(`[${ATTR_SHEEN}]`);
   if (!sheen) {
@@ -239,6 +254,8 @@ function drawSheen(
     root.append(sheen);
   }
   const band = sheen.firstElementChild as HTMLElement;
+  // Forced colors removes background images, so the sweep would only cost a mask it cannot show
+  sheen.style.display = forced ? "none" : "";
 
   const mask = maskOf(rects, width, height);
   if (sheen.dataset.mask !== mask) {
@@ -247,6 +264,11 @@ function drawSheen(
     sheen.style.height = `${height}px`;
     sheen.style.maskImage = mask;
     sheen.style.setProperty("-webkit-mask-image", mask);
+    // Explicit, so an engine cannot fall back to the SVG's rounded intrinsic size
+    sheen.style.maskSize = "100% 100%";
+    sheen.style.setProperty("-webkit-mask-size", "100% 100%");
+    sheen.style.maskPosition = "0 0";
+    sheen.style.setProperty("-webkit-mask-position", "0 0");
   }
 
   const area: Span =
@@ -263,7 +285,7 @@ function drawSheen(
   band.dataset.motion = key;
 
   running.get(band)?.cancel();
-  band.style.cssText = `position:absolute;top:0;bottom:0;left:${-px(tile)}px;width:calc(100% + ${px(tile)}px);background-image:${image};background-size:${px(tile)}px 100%;background-repeat:repeat-x;background-position:${px(-along)}px 0;will-change:transform`;
+  band.style.cssText = `position:absolute;top:0;bottom:0;left:${-px(tile)}px;width:calc(100% + ${px(tile)}px);background-image:${image};background-size:${px(tile)}px 100%;background-repeat:repeat-x;background-position:${px(-along)}px 0`;
   const sweep = band.animate(
     [{ transform: "translateX(0)" }, { transform: `translateX(${px(tile)}px)` }],
     { duration: tile * pace, iterations: Infinity },
@@ -289,10 +311,23 @@ export function drawSkeleton(layer: HTMLElement, rects: SkeletonRect[]) {
   const scaleX = width ? rect.width / width : 1;
   const scaleY = height ? rect.height / height : 1;
   const pageWidth = document.documentElement.clientWidth || innerWidth;
+  const forced = forcedColors();
+  const masked = canMask();
+  // A hidden layer has nothing to mask, and without mask support the highlight would paint over everything
   const sheen =
     (motion.animation === "shimmer" || motion.animation === "group-shimmer") &&
     !prefersReducedMotion() &&
-    typeof layer.animate === "function";
+    typeof layer.animate === "function" &&
+    masked &&
+    width > 0 &&
+    height > 0;
+  // No mask: fall back to the compositor-safe pulse rather than a gradient over the whole layer
+  const boneMotion = sheen
+    ? NO_MOTION
+    : !masked && motion.animation !== "pulse" && motion.animation !== "none"
+      ? { animation: "pulse" as const, duration: motion.duration }
+      : motion;
+  const base = forced ? "CanvasText" : BASE;
 
   const bones = rectsOf(layer);
   const before = sheenOf(layer);
@@ -302,7 +337,7 @@ export function drawSkeleton(layer: HTMLElement, rects: SkeletonRect[]) {
       element = document.createElement("div");
       element.setAttribute(ATTR_RECT, "");
       // Inline: no page stylesheet reaches into the shadow root
-      element.style.cssText = `position:absolute;display:block;pointer-events:none;background-color:${BASE};background-repeat:no-repeat`;
+      element.style.cssText = `position:absolute;display:block;pointer-events:none;background-color:${base};background-repeat:no-repeat`;
       root.insertBefore(element, before);
     }
 
@@ -312,7 +347,10 @@ export function drawSkeleton(layer: HTMLElement, rects: SkeletonRect[]) {
       width: `${part.width}px`,
       height: `${part.height}px`,
       borderRadius: part.radius,
+      backgroundColor: base,
     });
+    // Forced colors would otherwise paint the bones with the page's text color and flatten the bars
+    element.style.setProperty("forced-color-adjust", forced ? "none" : "");
 
     // Restarted only when its place, group, the page's width or the motion changes
     const key = sheen
@@ -326,15 +364,18 @@ export function drawSkeleton(layer: HTMLElement, rects: SkeletonRect[]) {
         width: part.width * scaleX,
         height: part.height * scaleY,
       };
-      shimmer(element, group, sheen ? NO_MOTION : motion, box, pageWidth);
+      shimmer(element, group, boneMotion, box, pageWidth);
     }
   });
 
   for (const extra of bones.slice(rects.length)) extra.remove();
 
   if (sheen) {
-    drawSheen(root, rects, { group, motion, pageWidth, width, height });
+    drawSheen(root, rects, { group, motion, pageWidth, width, height, forced });
   } else {
+    // A removed sheen must not leave its animation running on a detached element
+    const band = before?.firstElementChild as HTMLElement | null;
+    if (band) running.get(band)?.cancel();
     before?.remove();
   }
 }
